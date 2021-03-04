@@ -2,15 +2,27 @@ from __future__ import print_function, division
 from collections import OrderedDict
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
+
 from torch.autograd import Variable
 import torchvision.models as models
 import numpy as np
 import numpy.matlib
 import pickle
 import MinkowskiEngine as ME
+import math
 
 from .conv4d import Conv4d
-from .sparse import transpose_torch, transpose_me, torch_to_me, me_to_torch, corr_and_add
+from .sparse import *
+
+def dense_to_sparse(x):
+    """ converts dense tensor x to sparse format """
+
+    indices = torch.nonzero(x)
+
+    indices = indices.t()
+    values = x[tuple(indices[i] for i in range(indices.shape[0]))]
+    return torch.sparse.FloatTensor(indices,values).coalesce()
 
 def featureL2Norm(feature):
     epsilon = 1e-6
@@ -66,7 +78,57 @@ def corr_dense(feature_A, feature_B):
     correlation_tensor = feature_mul.view(b,hA,wA,hB,wB).unsqueeze(1)
         
     return correlation_tensor
-    
+
+class GeometricSparseNeighConsensus(torch.nn.Module):
+    def __init__(self, use_cuda=True, kernel_sizes=[3], channels=[1], symmetric_mode=True, bn=False, dimension=6):
+        super(GeometricSparseNeighConsensus, self).__init__()
+        self.symmetric_mode = symmetric_mode
+        self.kernel_sizes = kernel_sizes
+        self.channels = channels
+        num_layers = len(kernel_sizes)
+        nn_modules = list()
+        ch_in = 1
+        ch_out = channels[0]
+        k_size = kernel_sizes[0]
+        nn_modules.append(ME.MinkowskiConvolution(1,1,kernel_size=k_size,bias=False,dimension=dimension))
+        #nn_modules.append(ME.MinkowskiConvolution(8,1,kernel_size=k_size,bias=False,dimension=dimension))
+        nn_modules.append(ME.MinkowskiSigmoid())
+        self.conv = nn.Sequential(*nn_modules) 
+        
+        if use_cuda:
+            self.conv.cuda()
+        
+        if use_cuda:
+            self.conv.cuda()
+
+    def forward(self, x):
+        if self.symmetric_mode:
+            # apply network on the input and its "transpose" (swapping A-B to B-A ordering of the correlation tensor),
+            # this second result is "transposed back" to the A-B ordering to match the first result and be able to add together
+
+            x1 = me_to_torch(self.conv(x))
+            x = x1 + transpose_torch_6d(me_to_torch(self.conv(transpose_me_6d(x))))
+            x = x.coalesce().to_dense()
+            x = x.squeeze()
+            b, s, s, dim, _ , _, _ = x.shape
+            x = x.reshape(b,-1,dim,dim,dim,dim)
+            x = x.squeeze().max(dim=1)[0]
+            x = dense_to_sparse(x)
+            x = torch_to_me(x)
+
+        else:
+            x = me_to_torch(self.conv(x))
+            x = x.coalesce().to_dense()
+            x = x.squeeze()
+            b, s, s, dim, _ , _, _ = x.shape
+            x = x.reshape(b,-1,dim,dim,dim,dim)
+            x = x.squeeze().max(dim=1)[0]
+            x = dense_to_sparse(x)
+            x = torch_to_me(x)
+        
+        torch.cuda.empty_cache()
+        return x
+
 class SparseNeighConsensus(torch.nn.Module):
     def __init__(self, use_cuda=True, kernel_sizes=[3,3,3], channels=[10,10,1], symmetric_mode=True, bn=False):
         super(SparseNeighConsensus, self).__init__()
@@ -84,14 +146,13 @@ class SparseNeighConsensus(torch.nn.Module):
             ch_out = channels[i]
             k_size = kernel_sizes[i]
             if ch_out==1 or bn==False:
-                nn_modules.append(ME.MinkowskiConvolution(ch_in,ch_out,kernel_size=k_size,has_bias=True,dimension=4))
+                nn_modules.append(ME.MinkowskiConvolution(ch_in,ch_out,kernel_size=k_size,bias=True,dimension=4))
             elif bn==True:
                 nn_modules.append(torch.nn.Sequential(
-                    ME.MinkowskiConvolution(ch_in,ch_out,kernel_size=k_size,has_bias=True,dimension=4),
+                    ME.MinkowskiConvolution(ch_in,ch_out,kernel_size=k_size,bias=True,dimension=4),
                     ME.MinkowskiBatchNorm(ch_out)))
             nn_modules.append(ME.MinkowskiReLU(inplace=True))
         self.conv = nn.Sequential(*nn_modules) 
-#        self.add = ME.MinkowskiUnion()
         
         if use_cuda:
             self.conv.cuda()
@@ -302,5 +363,178 @@ class ImMatchNet(nn.Module):
             return corr4d
 
 
+#TODO: To_implement
+class TransformNet(nn.Module):
+    def __init__(self, 
+                 feature_extraction_cnn='resnet101', 
+                 feature_extraction_last_layer='',
+                 feature_extraction_model_file='',
+                 return_correlation=False,
+                 ncons_kernel_sizes=[3],
+                 ncons_channels=[1],
+                 normalize_features=True,
+                 train_fe=False,
+                 use_cuda=True,
+                 relocalization_k_size=0,
+                 half_precision=False,
+                 checkpoint=None,
+                 sparse=False,
+                 symmetric_mode=True,
+                 k = 10,
+                 bn=False,
+                 return_fs=False,
+                 change_stride=False,
+                 scale=3
+                 ):
         
+        super(TransformNet, self).__init__()
+        # Load checkpoint
+        if checkpoint is not None and checkpoint is not '':
+            ncons_channels, ncons_kernel_sizes, checkpoint = self.get_checkpoint_parameters(checkpoint)
+
+        self.use_cuda = use_cuda
+        self.normalize_features = normalize_features
+        self.return_correlation = return_correlation
+        self.relocalization_k_size = relocalization_k_size
+        self.half_precision = half_precision
+        self.sparse = sparse
+        self.k = k
+        self.d2 = feature_extraction_cnn=='d2'
+        self.return_fs = return_fs
+        self.Npts = None
+        
+        self.FeatureExtraction = FeatureExtraction(train_fe=train_fe,
+                                                   feature_extraction_cnn=feature_extraction_cnn,
+                                                   feature_extraction_model_file=feature_extraction_model_file,
+                                                   last_layer=feature_extraction_last_layer,
+                                                   normalization=normalize_features,
+                                                   use_cuda=self.use_cuda)
+        self.FeatureExtraction.eval()
+        
+        self.NeighConsensus = GeometricSparseNeighConsensus(use_cuda=self.use_cuda,
+                                            kernel_sizes=ncons_kernel_sizes,
+                                            channels=ncons_channels,
+                                            symmetric_mode=False,#symmetric_mode,
+                                            bn = bn)
+
+        self.refineNeighConsensus = SparseNeighConsensus(use_cuda=self.use_cuda,
+                                            kernel_sizes=[3,3],
+                                            channels=[8,1],
+                                            symmetric_mode=symmetric_mode,
+                                            bn = bn)
+
+        if checkpoint is not None and checkpoint is not '': self.load_weights(checkpoint)
+        if self.half_precision: self.set_half_precision()
+        if change_stride: self.FeatureExtraction.change_stride()
+
+        # for 6d purposes 
+        if scale == 3:
+            self.scales = [0.5, 1, 2]
+        elif scale == 5:
+            self.scales = [0.5, 0.75, 1, 1.5, 2]
+
+        self.conv2ds = []
+        self.conv2ds.append(nn.ModuleList(
+                    [nn.Conv2d(1024, 1024 // 4, kernel_size=3, stride=1, padding=1, bias=False).cuda() for _ in self.scales]))
+        #self.conv2ds = nn.ModuleList(self.conv2ds)
+
+        self.sigmoid = nn.Sigmoid()
+
+    def get_checkpoint_parameters(self, checkpoint):
+        print('Loading checkpoint...')
+        checkpoint = torch.load(checkpoint, map_location=lambda storage, loc: storage)
+        checkpoint['state_dict'] = OrderedDict([(k.replace('vgg', 'model'), v) for k, v in checkpoint['state_dict'].items()])
+        # override relevant parameters
+        print('Using checkpoint parameters: ')
+        ncons_channels=checkpoint['args'].ncons_channels
+        print('  ncons_channels: '+str(ncons_channels))
+        ncons_kernel_sizes=checkpoint['args'].ncons_kernel_sizes
+        print('  ncons_kernel_sizes: '+str(ncons_kernel_sizes)) 
+        return ncons_channels, ncons_kernel_sizes, checkpoint
+    
+    def load_weights(self, checkpoint):
+        # Load weights
+        print('Copying weights...')
+        for name, param in self.FeatureExtraction.state_dict().items():
+            if 'num_batches_tracked' not in name:
+                self.FeatureExtraction.state_dict()[name].copy_(checkpoint['state_dict']['FeatureExtraction.' + name])    
+        for name, param in self.NeighConsensus.state_dict().items():
+            self.NeighConsensus.state_dict()[name].copy_(checkpoint['state_dict']['NeighConsensus.' + name])
+        print('Done!')
+        
+    def set_half_precision(self):
+        for p in self.NeighConsensus.parameters():
+            p.data=p.data.half()
+        for l in self.NeighConsensus.conv:
+            if isinstance(l,Conv4d):
+                l.use_half=True
+                    
+    def forward(self, tnf_batch): 
+        # feature extraction
+        feature_A = self.FeatureExtraction(tnf_batch['source_image'])
+        feature_B = self.FeatureExtraction(tnf_batch['target_image'])
+        return self.process_sparse(feature_A, feature_B)
+            
+    def process_sparse(self, feature_A, feature_B):
+        # create a 6D tensor
+        correlations = self.scalespace_correlation(feature_A, feature_B, self.scales, self.conv2ds)
+        corr4d = self.NeighConsensus(correlations)
+        corr4d = self.refineNeighConsensus(corr4d)
+        #corr6d = self.sigmoid(corr6d)
+
+        return corr4d
+
+    def scalespace_correlation(self, src_feat, trg_feat, scales, conv2d):
+        r""" *_feats: list of features from intermediate layers
+             [(bsz, ch_1, h, w), (bsz, ch_2, h, w), ..., (bsz, ch_n, h, w)]
+        """
+
+        bsz, ch, side, side = src_feat.size()
+
+        new_src_feats = []
+        new_trg_feats = []
+        for scale, conv in zip(scales, conv2d[0]):
+            new_side = round(side * math.sqrt(scale))
+            new_src_feat = F.interpolate(src_feat, (new_side, new_side), mode='bilinear', align_corners=True)
+            new_trg_feat = F.interpolate(trg_feat, (new_side, new_side), mode='bilinear', align_corners=True)
+            new_src_feats.append(conv(new_src_feat))
+            new_trg_feats.append(conv(new_trg_feat))
+
+        correlations = []
+
+        length = bsz * side * side * self.k
+        scalewise_feat_st = torch.zeros(length * len(scales) * len(scales), 1, device=torch.device('cuda'))
+        scalewise_coord_st = torch.zeros(length * len(scales) * len(scales), 7, device=torch.device('cuda'), dtype=torch.int)
+        scalewise_feat_ts = torch.zeros(length * len(scales) * len(scales), 1, device=torch.device('cuda'))
+        scalewise_coord_ts = torch.zeros(length * len(scales) * len(scales), 7, device=torch.device('cuda'), dtype=torch.int)
+        for s_1, src_feat in enumerate(new_src_feats):
+            new_ch = src_feat.size(1)
+
+            src_side = src_feat.size(-1)
+            src_feat = F.interpolate(src_feat, (side, side),mode='bilinear', align_corners=True)
+            #src_feat = src_feat.view(bsz, new_ch, -1)
+
+            for s_2, trg_feat in enumerate(new_trg_feats):
+                trg_side = trg_feat.size(-1)
+                trg_feat = F.interpolate(trg_feat, (side, side),mode='bilinear', align_corners=True)
+                #trg_feat = trg_feat.view(bsz, new_ch, -1)
+
+                corr_coords_st = sparse_corr_6d([s_1,s_2], src_feat, trg_feat, k=self.k, ratio=False, sparse_type='raw')
+                corr_coords_ts = sparse_corr_6d([s_1,s_2], trg_feat, src_feat, k=self.k, ratio=False, sparse_type='raw')
+
+                start = (s_2 + s_1 * len(scales)) * length
+                end = start + length
+                
+                scalewise_feat_st[start:end] = corr_coords_st[0]
+                scalewise_coord_st[start:end] = corr_coords_st[1]
+                scalewise_feat_ts[start:end] = corr_coords_ts[0]
+                scalewise_coord_ts[start:end] = corr_coords_ts[1]
+
+        #import pdb; pdb.set_trace()
+        s2t = ME.SparseTensor(scalewise_feat_st, scalewise_coord_st)
+        t2s = ME.SparseTensor(scalewise_feat_ts, scalewise_coord_ts, coordinate_manager=s2t.coordinate_manager)
+        correlations = ME.MinkowskiUnion()(s2t, t2s)         
+
+        return correlations
+
 

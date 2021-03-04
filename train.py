@@ -12,7 +12,7 @@ from torch.nn.functional import relu
 from torch.utils.data import Dataset
 
 from lib.dataloader import DataLoader # modified dataloader
-from lib.model import ImMatchNet
+from lib.model import ImMatchNet, TransformNet
 from lib.im_pair_dataset import ImagePairDataset
 from lib.normalization import NormalizeImageDict, normalize_image_dict_caffe
 from lib.torch_util import save_checkpoint, str_to_bool
@@ -39,13 +39,13 @@ print('Sparse-NCNet training script')
 parser = argparse.ArgumentParser()
 parser.add_argument('--checkpoint', type=str, default='')
 parser.add_argument('--image_size', type=int, default=400)
-parser.add_argument('--dataset_image_path', type=str, default='datasets/ivd', help='path to IVD dataset')
-parser.add_argument('--dataset_csv_path', type=str, default='datasets/ivd/image_pairs/', help='path to IVD training csv')
+parser.add_argument('--dataset_image_path', type=str, default='../data/ivd', help='path to IVD dataset')
+parser.add_argument('--dataset_csv_path', type=str, default='../data/ivd/image_pairs/', help='path to IVD training csv')
 parser.add_argument('--num_epochs', type=int, default=5, help='number of training epochs')
-parser.add_argument('--batch_size', type=int, default=16, help='training batch size')
+parser.add_argument('--batch_size', type=int, default=4, help='training batch size')
 parser.add_argument('--lr', type=float, default=0.0005, help='learning rate')
-parser.add_argument('--ncons_kernel_sizes', nargs='+', type=int, default=[3,3], help='kernels sizes in neigh. cons.')
-parser.add_argument('--ncons_channels', nargs='+', type=int, default=[16,1], help='channels in neigh. cons')
+parser.add_argument('--ncons_kernel_sizes', nargs='+', type=int, default=[3], help='kernels sizes in neigh. cons.')
+parser.add_argument('--ncons_channels', nargs='+', type=int, default=[1], help='channels in neigh. cons')
 parser.add_argument('--result_model_fn', type=str, default='sparsencnet', help='trained model filename')
 parser.add_argument('--result-model-dir', type=str, default='trained_models', help='path to trained models folder')
 parser.add_argument('--fe_finetune_params',  type=int, default=0, help='number of layers to finetune')
@@ -63,7 +63,8 @@ print(args)
 
 # Create model
 print('Creating CNN model...')
-model = ImMatchNet(use_cuda=use_cuda,
+Model = TransformNet
+model = Model(use_cuda=use_cuda,
                        checkpoint=args.checkpoint,
                        ncons_kernel_sizes=args.ncons_kernel_sizes,
                        ncons_channels=args.ncons_channels,
@@ -89,15 +90,14 @@ def eval_model_fn(batch):
     else:
         feature_A = model.FeatureExtraction(batch['source_image'])
         feature_B = model.FeatureExtraction(batch['target_image'])
-        
+    
     feature_A = featureL2Norm(feature_A)
     feature_B = featureL2Norm(feature_B)
     
     fs1, fs2 = feature_A.shape[-2:]
     fs3, fs4 = feature_B.shape[-2:]
     
-    corr4d = corr_and_add(feature_A, feature_B, k = model.k)
-    corr4d = model.NeighConsensus(corr4d)
+    corr4d = model.process_sparse(feature_A, feature_B)
     
     return corr4d
 
@@ -184,7 +184,7 @@ def weak_loss(model,batch,normalization='softmax',alpha=30):
     torch.cuda.synchronize()
     model_time = start.elapsed_time(mid)/1000
     loss_time = mid.elapsed_time(end)/1000
-    #print('model: {:.2f}: loss: {:.2f}'.format(model_time,loss_time))
+    print('model: {:.2f}: loss: {:.2f}'.format(model_time,loss_time))
 
     # negative
     batch['source_image']=batch['source_image'][np.roll(np.arange(b),-1),:] # roll

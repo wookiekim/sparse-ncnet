@@ -6,6 +6,108 @@ import math
 from .knn import knn_faiss
 import numpy as np
 
+def sparse_corr_6d(scalespace,
+                feature_A,
+                feature_B,
+                k=10,
+                coords_A=None,
+                coords_B=None,
+                reverse=False,
+                ratio=False,
+                sparse_type='torch',
+                return_indx=False,
+                fsize = None,
+                bidx = None):
+
+    b,ch=feature_B.shape[:2]
+    
+    if fsize is None:
+        hA, wA = feature_A.shape[2:]
+        hB, wB = feature_B.shape[2:]
+    else:
+        hA, wA = fsize
+        hB, wB = fsize
+        
+    feature_A = feature_A.view(b,ch,-1)
+    feature_B = feature_B.view(b,ch,-1)
+
+    nA = feature_A.shape[2]
+    nB = feature_B.shape[2]
+    
+    with torch.no_grad():
+        dist_squared, indx = knn_faiss(feature_B, feature_A, k)
+    
+    if bidx is None: bidx = torch.arange(b).view(b,1,1)
+    bidx = bidx.expand_as(indx).contiguous()
+
+    sidx1 = torch.empty(indx.shape).fill_(scalespace[0]).view(-1,1)
+    sidx2 = torch.empty(indx.shape).fill_(scalespace[1]).view(-1,1)
+
+    if feature_A.requires_grad:
+        corr = (feature_A.permute(1,0,2).unsqueeze(2) * \
+                feature_B.permute(1,0,2)[:,bidx.view(-1),indx.view(-1)].view(ch,b,k,nA)).sum(dim=0).contiguous()
+    else:
+        corr = 1-dist_squared/2  # [b,k,nA]
+        
+
+    if ratio:
+        corr_ratio=corr/corr[:,:1,:]
+
+    if coords_A is None:
+        YA,XA=torch.meshgrid(torch.arange(hA),torch.arange(wA))
+        YA=YA.contiguous()
+        XA=XA.contiguous()
+        yA=YA.view(-1).unsqueeze(0).unsqueeze(0).expand(b,k,nA).contiguous().view(-1,1)
+        xA=XA.view(-1).unsqueeze(0).unsqueeze(0).expand(b,k,nA).contiguous().view(-1,1)
+    else:
+        yA,xA = coords_A
+        yA=yA.view(-1).unsqueeze(0).unsqueeze(0).expand(b,k,nA).contiguous().view(-1,1)
+        xA=xA.view(-1).unsqueeze(0).unsqueeze(0).expand(b,k,nA).contiguous().view(-1,1)
+
+    if coords_B is None:
+        YB,XB=torch.meshgrid(torch.arange(hB),torch.arange(wB))
+        YB=YB.contiguous()
+        XB=XB.contiguous()
+        yB=YB.view(-1)[indx.view(-1).cpu()].view(-1,1)
+        xB=XB.view(-1)[indx.view(-1).cpu()].view(-1,1)
+    else:
+        yB,xB = coords_B
+        yB=yB.view(-1)[indx.view(-1).cpu()].view(-1,1)
+        xB=xB.view(-1)[indx.view(-1).cpu()].view(-1,1)
+
+    bidx = bidx.view(-1,1)
+    corr=corr.view(-1,1)
+    if ratio: corr_ratio = corr_ratio.view(-1,1)
+
+    if reverse:
+        yA,xA,yB,xB=yB,xB,yA,xA
+        hA,wA,hB,wB=hB,wB,hA,wA
+
+    if sparse_type == 'me':
+        coords = torch.cat((bidx, sidx1, sidx2, yA, xA, yB, xB),dim=1).int()
+        scorr = ME.SparseTensor(corr, coords)
+
+        if ratio: scorr_ratio = ME.SparseTensor(corr_ratio,coords)
+
+    elif sparse_type == 'torch':
+        coords = torch.cat((bidx, sidx1, sidx2, yA, xA, yB, xB),dim=1).long().to(corr.device).t()
+        scorr = torch.sparse.FloatTensor(coords,corr,torch.Size([b,hA,wA,hB,wB,1]))
+
+        if ratio: scorr_ratio = torch.sparse.FloatTensor(coords,corr_ratio,torch.Size([b,hA,wA,hB,wB,1]))
+            
+    elif sparse_type == 'raw':
+        coords = torch.cat((bidx, sidx1, sidx2, yA, xA, yB, xB),dim=1).int()
+        scorr = (corr, coords)
+
+        if ratio: scorr_ratio = (corr_ratio,coords)
+
+    else:
+        raise ValueError('sparse type {} not recognized'.format(sparse_type))
+
+    if ratio: return scorr, scorr_ratio
+    if return_indx: return corr, indx
+    return scorr
+
 def sparse_corr(feature_A,
                 feature_B,
                 k=10,
@@ -101,18 +203,17 @@ def sparse_corr(feature_A,
         raise ValueError('sparse type {} not recognized'.format(sparse_type))
 
     if ratio: return scorr, scorr_ratio
-    if return_indx: return scorr, indx
+    if return_indx: return corr, indx
     return scorr
 
 def torch_to_me(sten):
     sten = sten.coalesce()
-    indices = sten.indices().t().int().cpu()
-    
-    return ME.SparseTensor(sten.values(), indices)
+    indices = sten.indices().t().contiguous().int()#.cpu()
+    return ME.SparseTensor(sten.values().unsqueeze(1), indices)
 
 def me_to_torch(sten):
-    values = sten.feats
-    indices = sten.coords.t().long().to(values.device)
+    values = sten.features
+    indices = sten.coordinates.t().long().to(values.device)
     
     sten = torch.sparse.FloatTensor(indices,values).coalesce()
     
@@ -141,20 +242,31 @@ def corr_and_add(
         ratio=False,
         reverse=True, sparse_type='raw')
     
-    scorr = ME.SparseTensor(scorr[0],scorr[1])
-    scorr2 = ME.SparseTensor(scorr2[0],scorr2[1],coords_manager=scorr.coords_man,force_creation=True)
+    scorr = ME.SparseTensor(scorr[0],scorr[1].cuda())
+    scorr2 = ME.SparseTensor(scorr2[0],scorr2[1].cuda(),coordinate_manager=scorr.coordinate_manager)
     
     scorr = ME.MinkowskiUnion()(scorr,scorr2)
     
     return scorr
 
 def transpose_me(sten):
-    return ME.SparseTensor(sten.feats.clone(),
-                           sten.coords[:,[0,3,4,1,2]].clone())
+    return ME.SparseTensor(sten.features.clone(),
+                           sten.coordinates[:,[0,3,4,1,2]].clone())
+
+def transpose_me_6d(sten):
+    return ME.SparseTensor(sten.features.clone(),
+                           sten.coordinates[:,[0,1,2,5,6,3,4]].clone())
 
 def transpose_torch(sten):
     sten = sten.coalesce()
     indices = sten.indices()[[0,3,4,1,2],:]
+    values = sten.values()
+    
+    return torch.sparse.FloatTensor(indices,values).coalesce()
+
+def transpose_torch_6d(sten):
+    sten = sten.coalesce()
+    indices = sten.indices()[[0,1,2,5,6,3,4],:]
     values = sten.values()
     
     return torch.sparse.FloatTensor(indices,values).coalesce()
@@ -238,8 +350,8 @@ def get_matches(out, reverse=True, fsize=40, scale='centered'):
         c=[1,2]
         fh, fw = fs1, fs2
 
-    coords = out.coords[:,c].cuda()
-    feats = out.feats
+    coords = out.coordinates[:,c].cuda()
+    feats = out.features
     sorted_idx = torch.argsort(-feats,dim=0).view(-1)
     coords = coords[sorted_idx]
     
@@ -248,7 +360,7 @@ def get_matches(out, reverse=True, fsize=40, scale='centered'):
     matches_idx = sorted_idx[matches_idx]
     
     matches_scores = feats[matches_idx].t()
-    matches = out.coords.to(out.device)[matches_idx,1:]
+    matches = out.coordinates.to(out.device)[matches_idx,1:]
             
     if scale=='centered':
         yA = normalize_axis(matches[:,0]+1,fs1).unsqueeze(0).to(out.device)

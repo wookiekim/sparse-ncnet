@@ -30,8 +30,8 @@ use_cuda = torch.cuda.is_available()
 
 # Argument parsing
 parser = argparse.ArgumentParser()
-parser.add_argument('--checkpoint', type=str, default='../trained_models/sparsencnet_k10.pth.tar')
-parser.add_argument('--hseq_path', type=str, default='../datasets/hpatches/hpatches-sequences-release')
+parser.add_argument('--checkpoint', type=str, default='../trained_models/best_2021-03-03_20:29_sparsencnet.pth.tar')
+parser.add_argument('--hseq_path', type=str, default='../../data/hpatches_sequences/hpatches-sequences-release')
 parser.add_argument('--k_size', type=int, default=1)
 parser.add_argument('--image_size', type=int, default=3200)
 parser.add_argument('--experiment_name', type=str, default='sparsencnet_3200_hard_soft')
