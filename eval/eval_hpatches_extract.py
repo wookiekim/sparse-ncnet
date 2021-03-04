@@ -10,7 +10,7 @@ from collections import OrderedDict
 import sys
 sys.path.append('..')
 
-from lib.model import ImMatchNet, MutualMatching
+from lib.model import ImMatchNet, MutualMatching, TransformNet
 from lib.normalization import imreadth, resize, normalize
 from lib.torch_util import str_to_bool
 from lib.point_tnf import normalize_axis,unnormalize_axis,corr_to_matches
@@ -30,11 +30,11 @@ use_cuda = torch.cuda.is_available()
 
 # Argument parsing
 parser = argparse.ArgumentParser()
-parser.add_argument('--checkpoint', type=str, default='../trained_models/best_2021-03-03_20:29_sparsencnet.pth.tar')
+parser.add_argument('--checkpoint', type=str, default='../trained_models/best_2021-03-04_18:04_sparsencnet.pth.tar')
 parser.add_argument('--hseq_path', type=str, default='../../data/hpatches_sequences/hpatches-sequences-release')
 parser.add_argument('--k_size', type=int, default=1)
-parser.add_argument('--image_size', type=int, default=3200)
-parser.add_argument('--experiment_name', type=str, default='sparsencnet_3200_hard_soft')
+parser.add_argument('--image_size', type=int, default=800)
+parser.add_argument('--experiment_name', type=str, default='chmnet_800_hard_soft')
 parser.add_argument('--symmetric_mode', type=str_to_bool, default=True)
 parser.add_argument('--nchunks', type=int, default=1)
 parser.add_argument('--chunk_idx', type=int, default=0)
@@ -52,7 +52,8 @@ args = parser.parse_args()
 print(args)
 
 chp_args = torch.load(args.checkpoint)['args']
-model = ImMatchNet(use_cuda=use_cuda,
+Model = TransformNet
+model = Model(use_cuda=use_cuda,
                    checkpoint=args.checkpoint,
                    ncons_kernel_sizes=chp_args.ncons_kernel_sizes,
                    ncons_channels=chp_args.ncons_channels,

@@ -103,14 +103,16 @@ elif plot=='variants':
                'ncnet.sparsencnet_1600_hard_2k',
                'ncnet.densencnet_1600_hard_2k',
                'ncnet.sparsencnet_1600_hard_soft_2k',
-               'ncnet.sparsencnet_3200_hard_soft_2k']
+               'chmnet_800_hard_soft']
+               #'sparsencnet_3200_hard_soft']
+               #'chmnetnet_1200_hard_soft']
     
     names = ['Sparse-NCNet, r=800',
              'NCNet, r=800',
              'Sparse-NCNet, hard, r=1600',
              'NCNet, hard, r=1600',
              'Sparse-NCNet, hard+soft, r=1600',
-             'Sparse-NCNet, hard+soft, r=3200']
+             'CHMNet, hard+soft, r=800']
 
     markers = ['^','o','|','s','x','']
     
@@ -290,10 +292,17 @@ def summary(stats):
 # In[71]:
 
 
-def generate_read_function(method, extension='ppm'):
+def generate_read_function(method, extension='npz'):
     if method.startswith('ncnet'):
         def read_function_ncnet(seq_name, im_idx):
             aux = np.load(os.path.join(dataset_path, seq_name, '{}_{}.npz'.format(1,im_idx)+method[5:]))
+            assert('scores' in aux)
+            ids = np.argsort(aux['scores'])[-top_k :]
+            return aux['keypoints_A'][ids, :], aux['keypoints_B'][ids, :]
+        return read_function_ncnet
+    elif method.startswith('chmnet') or method.startswith('sparse'):
+        def read_function_ncnet(seq_name, im_idx):
+            aux = np.load(os.path.join(dataset_path, seq_name, '{}_{}.npz'.format(1,im_idx)+'.'+method))
             assert('scores' in aux)
             ids = np.argsort(aux['scores'])[-top_k :]
             return aux['keypoints_A'][ids, :], aux['keypoints_B'][ids, :]
@@ -356,7 +365,7 @@ for method in methods:
         read_function = lambda seq_name, im_idx: parse_mat(loadmat(os.path.join(dataset_path, seq_name, '%d.ppm.hesaff' % im_idx), appendmat=False))
     else:
         read_function = generate_read_function(method)
-    if method.startswith('ncnet'):
+    if method.startswith('ncnet') or method.startswith('sparse') or method.startswith('chmnet'):
         benchmark_function=benchmark_features_ncnet
     else:
         benchmark_function=benchmark_features
