@@ -90,8 +90,11 @@ class GeometricSparseNeighConsensus(torch.nn.Module):
         ch_in = 1
         ch_out = channels[0]
         k_size = kernel_sizes[0]
+        nn_modules.append(ME.MinkowskiReLU(inplace=True))
         nn_modules.append(ME.MinkowskiConvolution(1,1,kernel_size=k_size,bias=False,dimension=dimension))
+
         #nn_modules.append(ME.MinkowskiConvolution(8,1,kernel_size=k_size,bias=False,dimension=dimension))
+        #nn_modules.append(ME.MinkowskiSigmoid())
         nn_modules.append(ME.MinkowskiSigmoid())
         self.conv = nn.Sequential(*nn_modules) 
         
@@ -109,24 +112,16 @@ class GeometricSparseNeighConsensus(torch.nn.Module):
             x1 = me_to_torch(self.conv(x))
             x = x1 + transpose_torch_6d(me_to_torch(self.conv(transpose_me_6d(x))))
             x = x.coalesce().to_dense()
-            x = x.squeeze()
+            #x = me_to_torch(x).coalesce().to_dense()
+            x = x.squeeze(-1)
             b, s, s, dim, _ , _, _ = x.shape
             x = x.reshape(b,-1,dim,dim,dim,dim)
-            x = x.squeeze().max(dim=1)[0]
+            x = x.max(dim=1)[0]
             x = dense_to_sparse(x)
             x = torch_to_me(x)
-
         else:
-            x = me_to_torch(self.conv(x))
-            x = x.coalesce().to_dense()
-            x = x.squeeze()
-            b, s, s, dim, _ , _, _ = x.shape
-            x = x.reshape(b,-1,dim,dim,dim,dim)
-            x = x.squeeze().max(dim=1)[0]
-            x = dense_to_sparse(x)
-            x = torch_to_me(x)
+            exit("Not symmetric mode")
         
-        torch.cuda.empty_cache()
         return x
 
 class SparseNeighConsensus(torch.nn.Module):
@@ -389,8 +384,8 @@ class TransformNet(nn.Module):
         
         super(TransformNet, self).__init__()
         # Load checkpoint
-        if checkpoint is not None and checkpoint is not '':
-            ncons_channels, ncons_kernel_sizes, checkpoint = self.get_checkpoint_parameters(checkpoint)
+        #if checkpoint is not None and checkpoint is not '':
+        #    ncons_channels, ncons_kernel_sizes, checkpoint = self.get_checkpoint_parameters(checkpoint)
 
         self.use_cuda = use_cuda
         self.normalize_features = normalize_features
@@ -414,16 +409,16 @@ class TransformNet(nn.Module):
         self.NeighConsensus = GeometricSparseNeighConsensus(use_cuda=self.use_cuda,
                                             kernel_sizes=ncons_kernel_sizes,
                                             channels=ncons_channels,
-                                            symmetric_mode=False,#symmetric_mode,
+                                            symmetric_mode=symmetric_mode,
                                             bn = bn)
 
         self.refineNeighConsensus = SparseNeighConsensus(use_cuda=self.use_cuda,
                                             kernel_sizes=[3,3],
-                                            channels=[8,1],
+                                            channels=[16,1],
                                             symmetric_mode=symmetric_mode,
                                             bn = bn)
 
-        if checkpoint is not None and checkpoint is not '': self.load_weights(checkpoint)
+        #if checkpoint is not None and checkpoint is not '': self.load_weights(checkpoint)
         if self.half_precision: self.set_half_precision()
         if change_stride: self.FeatureExtraction.change_stride()
 
@@ -436,13 +431,14 @@ class TransformNet(nn.Module):
         self.conv2ds = []
         self.conv2ds.append(nn.ModuleList(
                     [nn.Conv2d(1024, 1024 // 4, kernel_size=3, stride=1, padding=1, bias=False).cuda() for _ in self.scales]))
-        #self.conv2ds = nn.ModuleList(self.conv2ds)
+        self.conv2ds = nn.ModuleList(self.conv2ds)
 
         self.sigmoid = nn.Sigmoid()
 
     def get_checkpoint_parameters(self, checkpoint):
         print('Loading checkpoint...')
         checkpoint = torch.load(checkpoint, map_location=lambda storage, loc: storage)
+        import pdb; pdb.set_trace()
         checkpoint['state_dict'] = OrderedDict([(k.replace('vgg', 'model'), v) for k, v in checkpoint['state_dict'].items()])
         # override relevant parameters
         print('Using checkpoint parameters: ')
@@ -460,6 +456,11 @@ class TransformNet(nn.Module):
                 self.FeatureExtraction.state_dict()[name].copy_(checkpoint['state_dict']['FeatureExtraction.' + name])    
         for name, param in self.NeighConsensus.state_dict().items():
             self.NeighConsensus.state_dict()[name].copy_(checkpoint['state_dict']['NeighConsensus.' + name])
+        for name, param in self.refineNeighConsensus.state_dict().items():
+            self.refineNeighConsensus.state_dict()[name].copy_(checkpoint['state_dict']['refineNeighConsensus.' + name])
+        import pdb; pdb.set_trace()
+        for name, param in self.conv2ds.state_dict().items():
+            self.conv2ds.state_dict()[name].copy_(checkpoint['state_dict']['conv2ds.' + name])
         print('Done!')
         
     def set_half_precision(self):
@@ -479,8 +480,13 @@ class TransformNet(nn.Module):
         # create a 6D tensor
         correlations = self.scalespace_correlation(feature_A, feature_B, self.scales, self.conv2ds)
         corr4d = self.NeighConsensus(correlations)
+        #correlations = corr_and_add(feature_A, feature_B, k = self.k, Npts = self.Npts)
         corr4d = self.refineNeighConsensus(corr4d)
-        #corr6d = self.sigmoid(corr6d)
+
+        if self.return_fs:
+            fs1, fs2 = feature_A.shape[-2:]
+            fs3, fs4 = feature_B.shape[-2:]
+            return corr4d, fs1, fs2, fs3, fs4
 
         return corr4d
 
@@ -510,12 +516,10 @@ class TransformNet(nn.Module):
         for s_1, src_feat in enumerate(new_src_feats):
             new_ch = src_feat.size(1)
 
-            src_side = src_feat.size(-1)
             src_feat = F.interpolate(src_feat, (side, side),mode='bilinear', align_corners=True)
             #src_feat = src_feat.view(bsz, new_ch, -1)
 
             for s_2, trg_feat in enumerate(new_trg_feats):
-                trg_side = trg_feat.size(-1)
                 trg_feat = F.interpolate(trg_feat, (side, side),mode='bilinear', align_corners=True)
                 #trg_feat = trg_feat.view(bsz, new_ch, -1)
 

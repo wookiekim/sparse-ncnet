@@ -209,7 +209,10 @@ def sparse_corr(feature_A,
 def torch_to_me(sten):
     sten = sten.coalesce()
     indices = sten.indices().t().contiguous().int()#.cpu()
-    return ME.SparseTensor(sten.values().unsqueeze(1), indices)
+    features = sten.values()
+    if len(features.shape) == 1:
+        features = features.unsqueeze(1)
+    return ME.SparseTensor(features, indices)
 
 def me_to_torch(sten):
     values = sten.features

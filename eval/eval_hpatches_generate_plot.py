@@ -71,7 +71,7 @@ if plot=='baselines':
                'superpoint',
                'd2-net',
                'r2d2',
-               'sparsencnet_3200_hard_soft']
+               'debugging_chmnet']
                #'ncnet.sparsencnet_3200_hard_soft_1k']
     
     names = ['Hes. Aff. + Root-SIFT',
@@ -80,7 +80,7 @@ if plot=='baselines':
              'SuperPoint',
              'D2-Net Trained', 
              'R2D2',
-             'Sparse-NCNet, hard+soft, r=3200']
+             'debugging, hard+soft, r=1600']
     
     colors=[cbcolors[3],
             cbcolors[14],
@@ -103,7 +103,7 @@ elif plot=='variants':
                'ncnet.sparsencnet_1600_hard_2k',
                'ncnet.densencnet_1600_hard_2k',
                'ncnet.sparsencnet_1600_hard_soft_2k',
-               'chmnet_800_hard_soft']
+               'chmnet4only_1_1800_hard_soft']
                #'sparsencnet_3200_hard_soft']
                #'chmnetnet_1200_hard_soft']
     
@@ -112,7 +112,7 @@ elif plot=='variants':
              'Sparse-NCNet, hard, r=1600',
              'NCNet, hard, r=1600',
              'Sparse-NCNet, hard+soft, r=1600',
-             'CHMNet, hard+soft, r=800']
+             'chmnet4Donly, hard+soft, r=1800']
 
     markers = ['^','o','|','s','x','']
     
@@ -292,7 +292,7 @@ def summary(stats):
 # In[71]:
 
 
-def generate_read_function(method, extension='npz'):
+def generate_read_function(method, extension='ppm'):
     if method.startswith('ncnet'):
         def read_function_ncnet(seq_name, im_idx):
             aux = np.load(os.path.join(dataset_path, seq_name, '{}_{}.npz'.format(1,im_idx)+method[5:]))
@@ -300,7 +300,7 @@ def generate_read_function(method, extension='npz'):
             ids = np.argsort(aux['scores'])[-top_k :]
             return aux['keypoints_A'][ids, :], aux['keypoints_B'][ids, :]
         return read_function_ncnet
-    elif method.startswith('chmnet') or method.startswith('sparse'):
+    elif method.startswith('chmnet') or method.startswith('sparse') or method.startswith('debugging'):
         def read_function_ncnet(seq_name, im_idx):
             aux = np.load(os.path.join(dataset_path, seq_name, '{}_{}.npz'.format(1,im_idx)+'.'+method))
             assert('scores' in aux)
@@ -365,7 +365,7 @@ for method in methods:
         read_function = lambda seq_name, im_idx: parse_mat(loadmat(os.path.join(dataset_path, seq_name, '%d.ppm.hesaff' % im_idx), appendmat=False))
     else:
         read_function = generate_read_function(method)
-    if method.startswith('ncnet') or method.startswith('sparse') or method.startswith('chmnet'):
+    if method.startswith('ncnet') or method.startswith('sparse') or method.startswith('chmnet') or method.startswith('debugging'):
         benchmark_function=benchmark_features_ncnet
     else:
         benchmark_function=benchmark_features

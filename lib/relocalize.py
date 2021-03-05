@@ -176,8 +176,10 @@ def eval_model_reloc(model, batch, args=None):
     if no_ncnet:
         corr4d = None
     else:
-        corr4d = corr_and_add(feature_A, feature_B, k = model.k, Npts=None)
-        corr4d = model.NeighConsensus(corr4d)
+        # corr6d = model.scalespace_correlation(feature_A, feature_B, model.scales, model.conv2ds)
+        # corr4d = model.NeighConsensus(corr6d)
+        # corr4d = model.refineNeighConsensus(corr4d)
+        corr4d = model.process_sparse(feature_A, feature_B)[0]
         
     if benchmark:
         end.record()

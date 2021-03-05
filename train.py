@@ -184,7 +184,7 @@ def weak_loss(model,batch,normalization='softmax',alpha=30):
     torch.cuda.synchronize()
     model_time = start.elapsed_time(mid)/1000
     loss_time = mid.elapsed_time(end)/1000
-    print('model: {:.2f}: loss: {:.2f}'.format(model_time,loss_time))
+    #print('model: {:.2f}: loss: {:.2f}'.format(model_time,loss_time))
 
     # negative
     batch['source_image']=batch['source_image'][np.roll(np.arange(b),-1),:] # roll
