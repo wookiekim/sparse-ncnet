@@ -146,28 +146,31 @@ def eval_model_reloc(model, batch, args=None):
         start.record()
     # feature extraction
     if relocalize:
-        feature_A_2x = model.FeatureExtraction.model(batch['source_image'])
-        feature_B_2x = model.FeatureExtraction.model(batch['target_image'])
-        
+        feature_A_2x = model.FeatureExtraction.forward(batch['source_image'])
+        feature_B_2x = model.FeatureExtraction.forward(batch['target_image'])
         if reloc_hard_crop_size==3:
+            exit("Ever reached here?")
             feature_A = F.max_pool2d(feature_A_2x, kernel_size=3, stride=2, padding=1)
             feature_B = F.max_pool2d(feature_B_2x, kernel_size=3, stride=2, padding=1)
         elif reloc_hard_crop_size==2:
-            feature_A = F.max_pool2d(feature_A_2x, kernel_size=2, stride=2, padding=0)
-            feature_B = F.max_pool2d(feature_B_2x, kernel_size=2, stride=2, padding=0)
+            feature_A = []
+            feature_B = []
+            for feat_a, feat_b in zip(feature_A_2x, feature_B_2x):
+                feature_A.append(F.max_pool2d(feat_a, kernel_size=2, stride=2, padding=0))
+                feature_B.append(F.max_pool2d(feat_b, kernel_size=2, stride=2, padding=0))
 
-        feature_A_2x = featureL2Norm(feature_A_2x)
-        feature_B_2x = featureL2Norm(feature_B_2x)
+        feature_A_2x = featureL2Norm(feature_A_2x[2])
+        feature_B_2x = featureL2Norm(feature_B_2x[2])
     else:
-        feature_A = model.FeatureExtraction.model(batch['source_image'])
-        feature_B = model.FeatureExtraction.model(batch['target_image'])
+        feature_A = model.FeatureExtraction.forward(batch['source_image'])
+        feature_B = model.FeatureExtraction.forward(batch['target_image'])
         feature_A_2x, feature_B_2x = None, None
         
     feature_A = featureL2Norm(feature_A)
     feature_B = featureL2Norm(feature_B)
     
-    fs1, fs2 = feature_A.shape[-2:]
-    fs3, fs4 = feature_B.shape[-2:]
+    fs1, fs2 = feature_A[0].shape[-2:]
+    fs3, fs4 = feature_B[0].shape[-2:]
     
     if benchmark:
         mid.record()

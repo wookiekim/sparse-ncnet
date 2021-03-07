@@ -103,7 +103,7 @@ elif plot=='variants':
                'ncnet.sparsencnet_1600_hard_2k',
                'ncnet.densencnet_1600_hard_2k',
                'ncnet.sparsencnet_1600_hard_soft_2k',
-               'chmnet4only_1_1800_hard_soft']
+               'debugging_chmnet_1100']
                #'sparsencnet_3200_hard_soft']
                #'chmnetnet_1200_hard_soft']
     
@@ -112,7 +112,7 @@ elif plot=='variants':
              'Sparse-NCNet, hard, r=1600',
              'NCNet, hard, r=1600',
              'Sparse-NCNet, hard+soft, r=1600',
-             'chmnet4Donly, hard+soft, r=1800']
+             'chmnet, hard+soft, r=1100']
 
     markers = ['^','o','|','s','x','']
     

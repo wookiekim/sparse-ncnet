@@ -82,8 +82,8 @@ if args.change_stride:
 def eval_model_fn(batch):
     # feature extraction
     if args.relocalize:
-        feature_A_2x = model.FeatureExtraction(batch['source_image'])
-        feature_B_2x = model.FeatureExtraction(batch['target_image'])
+        feature_A_2x = model.FeatureExtraction(batch['source_image'])[2]
+        feature_B_2x = model.FeatureExtraction(batch['target_image'])[2]
 
         feature_A = F.max_pool2d(feature_A_2x, kernel_size=3, stride=2, padding=1)
         feature_B = F.max_pool2d(feature_B_2x, kernel_size=3, stride=2, padding=1)
@@ -94,8 +94,8 @@ def eval_model_fn(batch):
     feature_A = featureL2Norm(feature_A)
     feature_B = featureL2Norm(feature_B)
     
-    fs1, fs2 = feature_A.shape[-2:]
-    fs3, fs4 = feature_B.shape[-2:]
+    fs1, fs2 = feature_A[0].shape[-2:]
+    fs3, fs4 = feature_B[0].shape[-2:]
     
     corr4d = model.process_sparse(feature_A, feature_B)
     

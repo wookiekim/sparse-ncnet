@@ -26,8 +26,15 @@ def dense_to_sparse(x):
 
 def featureL2Norm(feature):
     epsilon = 1e-6
-    norm = torch.pow(torch.sum(torch.pow(feature,2),1)+epsilon,0.5).unsqueeze(1).expand_as(feature)
-    return torch.div(feature,norm)
+    if isinstance(feature, list):
+        result = []
+        for f in feature:
+            norm = torch.pow(torch.sum(torch.pow(f,2),1)+epsilon,0.5).unsqueeze(1).expand_as(f)
+            result.append(torch.div(f, norm))
+        return result
+    else:
+        norm = torch.pow(torch.sum(torch.pow(feature,2),1)+epsilon,0.5).unsqueeze(1).expand_as(feature)
+        return torch.div(feature,norm)
 
 class FeatureExtraction(torch.nn.Module):
     def __init__(self, train_fe=False, feature_extraction_cnn='resnet101', feature_extraction_model_file='', normalization=True, last_layer='', use_cuda=True):
@@ -41,21 +48,40 @@ class FeatureExtraction(torch.nn.Module):
                 self.model = models.resnet101(pretrained=True)
             elif feature_extraction_cnn=='resnet18':
                 self.model = models.resnet18(pretrained=True)
+            elif feature_extraction_cnn=='resnet50':
+                self.model = models.resnet50(pretrained=True)
             if last_layer=='':
                 last_layer = 'layer3'                            
             resnet_module_list = [getattr(self.model,l) for l in resnet_feature_layers]
             last_layer_idx = resnet_feature_layers.index(last_layer)
-            self.model = nn.Sequential(*resnet_module_list[:last_layer_idx+1])
+            self.model = nn.Sequential(*resnet_module_list[:last_layer_idx])
+            self.f1 = nn.Sequential(resnet_module_list[last_layer_idx][0], resnet_module_list[last_layer_idx][1])
+            self.f2 = nn.Sequential(resnet_module_list[last_layer_idx][2], resnet_module_list[last_layer_idx][3])
+            self.f3 = nn.Sequential(resnet_module_list[last_layer_idx][4], resnet_module_list[last_layer_idx][5])
+
         if train_fe==False:
             # freeze parameters
             for param in self.model.parameters():
                 param.requires_grad = False
+            for param in self.f1.parameters():
+                param.requires_grad = False
+            for param in self.f2.parameters():
+                param.requires_grad = False
+            for param in self.f3.parameters():
+                param.requires_grad = False
         # move to GPU
         if use_cuda:
             self.model = self.model.cuda()
+            self.f1 = self.f1.cuda()
+            self.f2 = self.f2.cuda()
+            self.f3 = self.f3.cuda()
         
     def forward(self, image_batch):
         features = self.model(image_batch)
+        f1 = self.f1(features)
+        f2 = self.f2(f1)
+        f3 = self.f3(f2)
+        features = [f1,f2,f3]
         if self.normalization and not self.feature_extraction_cnn=='resnet101fpn':
             features = featureL2Norm(features)
         return features
@@ -100,9 +126,6 @@ class GeometricSparseNeighConsensus(torch.nn.Module):
         
         if use_cuda:
             self.conv.cuda()
-        
-        if use_cuda:
-            self.conv.cuda()
 
     def forward(self, x):
         if self.symmetric_mode:
@@ -114,9 +137,9 @@ class GeometricSparseNeighConsensus(torch.nn.Module):
             x = x.coalesce().to_dense()
             #x = me_to_torch(x).coalesce().to_dense()
             x = x.squeeze(-1)
-            b, s, s, dim, _ , _, _ = x.shape
-            x = x.reshape(b,-1,dim,dim,dim,dim)
-            x = x.max(dim=1)[0]
+            b, s, s, dim1, dim2 , dim3, dim4 = x.shape
+            x = x.reshape(b,-1,dim1,dim2,dim3,dim4)
+            x = x.sum(dim=1)
             x = dense_to_sparse(x)
             x = torch_to_me(x)
         else:
@@ -438,7 +461,6 @@ class TransformNet(nn.Module):
     def get_checkpoint_parameters(self, checkpoint):
         print('Loading checkpoint...')
         checkpoint = torch.load(checkpoint, map_location=lambda storage, loc: storage)
-        import pdb; pdb.set_trace()
         checkpoint['state_dict'] = OrderedDict([(k.replace('vgg', 'model'), v) for k, v in checkpoint['state_dict'].items()])
         # override relevant parameters
         print('Using checkpoint parameters: ')
@@ -458,7 +480,6 @@ class TransformNet(nn.Module):
             self.NeighConsensus.state_dict()[name].copy_(checkpoint['state_dict']['NeighConsensus.' + name])
         for name, param in self.refineNeighConsensus.state_dict().items():
             self.refineNeighConsensus.state_dict()[name].copy_(checkpoint['state_dict']['refineNeighConsensus.' + name])
-        import pdb; pdb.set_trace()
         for name, param in self.conv2ds.state_dict().items():
             self.conv2ds.state_dict()[name].copy_(checkpoint['state_dict']['conv2ds.' + name])
         print('Done!')
@@ -478,61 +499,67 @@ class TransformNet(nn.Module):
             
     def process_sparse(self, feature_A, feature_B):
         # create a 6D tensor
+        #import pdb; pdb.set_trace()
         correlations = self.scalespace_correlation(feature_A, feature_B, self.scales, self.conv2ds)
         corr4d = self.NeighConsensus(correlations)
-        #correlations = corr_and_add(feature_A, feature_B, k = self.k, Npts = self.Npts)
         corr4d = self.refineNeighConsensus(corr4d)
 
         if self.return_fs:
-            fs1, fs2 = feature_A.shape[-2:]
-            fs3, fs4 = feature_B.shape[-2:]
+            fs1, fs2 = feature_A[0].shape[-2:]
+            fs3, fs4 = feature_B[0].shape[-2:]
             return corr4d, fs1, fs2, fs3, fs4
 
         return corr4d
 
-    def scalespace_correlation(self, src_feat, trg_feat, scales, conv2d):
+    def scalespace_correlation(self, src_feats, trg_feats, scales, conv2d):
         r""" *_feats: list of features from intermediate layers
              [(bsz, ch_1, h, w), (bsz, ch_2, h, w), ..., (bsz, ch_n, h, w)]
         """
 
-        bsz, ch, side, side = src_feat.size()
+        bsz, ch, side1, side2 = src_feats[0].size()
+        bsz, ch, side3, side4 = trg_feats[0].size()
 
-        new_src_feats = []
-        new_trg_feats = []
-        for scale, conv in zip(scales, conv2d[0]):
-            new_side = round(side * math.sqrt(scale))
-            new_src_feat = F.interpolate(src_feat, (new_side, new_side), mode='bilinear', align_corners=True)
-            new_trg_feat = F.interpolate(trg_feat, (new_side, new_side), mode='bilinear', align_corners=True)
-            new_src_feats.append(conv(new_src_feat))
-            new_trg_feats.append(conv(new_trg_feat))
+        # new_src_feats = []
+        # new_trg_feats = []
+        # for scale, conv in zip(scales, conv2d[0]):
+        #     new_side = round(side * math.sqrt(scale))
+        #     new_src_feat = F.interpolate(src_feat, (new_side, new_side), mode='bilinear', align_corners=True)
+        #     new_trg_feat = F.interpolate(trg_feat, (new_side, new_side), mode='bilinear', align_corners=True)
+        #     new_src_feats.append(conv(new_src_feat))
+        #     new_trg_feats.append(conv(new_trg_feat))
 
-        correlations = []
+        # correlations = []
 
-        length = bsz * side * side * self.k
-        scalewise_feat_st = torch.zeros(length * len(scales) * len(scales), 1, device=torch.device('cuda'))
-        scalewise_coord_st = torch.zeros(length * len(scales) * len(scales), 7, device=torch.device('cuda'), dtype=torch.int)
-        scalewise_feat_ts = torch.zeros(length * len(scales) * len(scales), 1, device=torch.device('cuda'))
-        scalewise_coord_ts = torch.zeros(length * len(scales) * len(scales), 7, device=torch.device('cuda'), dtype=torch.int)
-        for s_1, src_feat in enumerate(new_src_feats):
+        length1 = bsz * side1 * side2 * self.k
+        length2 = bsz * side3 * side4 * self.k
+        #import pdb; pdb.set_trace()
+        scalewise_feat_st = torch.zeros(length1 * len(scales) * len(scales), 1, device=torch.device('cuda'))
+        scalewise_coord_st = torch.zeros(length1 * len(scales) * len(scales), 7, device=torch.device('cuda'), dtype=torch.int)
+        scalewise_feat_ts = torch.zeros(length2 * len(scales) * len(scales), 1, device=torch.device('cuda'))
+        scalewise_coord_ts = torch.zeros(length2 * len(scales) * len(scales), 7, device=torch.device('cuda'), dtype=torch.int)
+        for s_1, src_feat in enumerate(src_feats):
             new_ch = src_feat.size(1)
 
-            src_feat = F.interpolate(src_feat, (side, side),mode='bilinear', align_corners=True)
+            #src_feat = F.interpolate(src_feat, (side, side),mode='bilinear', align_corners=True)
             #src_feat = src_feat.view(bsz, new_ch, -1)
 
-            for s_2, trg_feat in enumerate(new_trg_feats):
-                trg_feat = F.interpolate(trg_feat, (side, side),mode='bilinear', align_corners=True)
+            for s_2, trg_feat in enumerate(trg_feats):
+                #trg_feat = F.interpolate(trg_feat, (side, side),mode='bilinear', align_corners=True)
                 #trg_feat = trg_feat.view(bsz, new_ch, -1)
 
                 corr_coords_st = sparse_corr_6d([s_1,s_2], src_feat, trg_feat, k=self.k, ratio=False, sparse_type='raw')
-                corr_coords_ts = sparse_corr_6d([s_1,s_2], trg_feat, src_feat, k=self.k, ratio=False, sparse_type='raw')
+                corr_coords_ts = sparse_corr_6d([s_1,s_2], trg_feat, src_feat, k=self.k, ratio=False, sparse_type='raw', reverse=True)
 
-                start = (s_2 + s_1 * len(scales)) * length
-                end = start + length
+                start1 = (s_2 + s_1 * len(scales)) * length1
+                end1 = start1 + length1
                 
-                scalewise_feat_st[start:end] = corr_coords_st[0]
-                scalewise_coord_st[start:end] = corr_coords_st[1]
-                scalewise_feat_ts[start:end] = corr_coords_ts[0]
-                scalewise_coord_ts[start:end] = corr_coords_ts[1]
+                start2 = (s_2 + s_1 * len(scales)) * length2
+                end2 = start2 + length2
+
+                scalewise_feat_st[start1:end1] = corr_coords_st[0]
+                scalewise_coord_st[start1:end1] = corr_coords_st[1]
+                scalewise_feat_ts[start2:end2] = corr_coords_ts[0]
+                scalewise_coord_ts[start2:end2] = corr_coords_ts[1]
 
         #import pdb; pdb.set_trace()
         s2t = ME.SparseTensor(scalewise_feat_st, scalewise_coord_st)
