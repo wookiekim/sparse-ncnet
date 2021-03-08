@@ -18,6 +18,7 @@ from lib.normalization import NormalizeImageDict, normalize_image_dict_caffe
 from lib.torch_util import save_checkpoint, str_to_bool
 from lib.torch_util import BatchTensorToVars, str_to_bool
 from lib.sparse import get_scores
+from lib.strongsup import StrongLossDataset
 
 from lib.sparse import corr_and_add
 import torch.nn.functional as F
@@ -115,39 +116,48 @@ for i,p in enumerate(filter(lambda p: p.requires_grad, model.parameters())):
 print('using Adam optimizer')
 optimizer = optim.Adam(filter(lambda p: p.requires_grad, model.parameters()), lr=args.lr)
     
-cnn_image_size=(args.image_size,args.image_size)
+# cnn_image_size=(args.image_size,args.image_size)
 
-Dataset = ImagePairDataset
-train_csv = 'train_pairs.csv'
-test_csv = 'val_pairs.csv'
-if args.feature_extraction_cnn == 'd2': #.startswith('d2'):
-    normalization_tnf = normalize_image_dict_caffe
-else:
-    normalization_tnf = NormalizeImageDict(['source_image','target_image'])
+# Dataset = ImagePairDataset
+# train_csv = 'train_pairs.csv'
+# test_csv = 'val_pairs.csv'
+# if args.feature_extraction_cnn == 'd2': #.startswith('d2'):
+#     normalization_tnf = normalize_image_dict_caffe
+# else:
+#     normalization_tnf = NormalizeImageDict(['source_image','target_image'])
     
+
+
 batch_preprocessing_fn = BatchTensorToVars(use_cuda=use_cuda)   
 
-# Dataset and dataloader
-dataset = Dataset(transform=normalization_tnf,
-                  dataset_image_path=args.dataset_image_path,
-                  dataset_csv_path=args.dataset_csv_path,
-                  dataset_csv_file = train_csv,
-                  output_size=cnn_image_size,
-                  random_affine = bool(args.random_affine))
+# # Dataset and dataloader
+# dataset = Dataset(transform=normalization_tnf,
+#                   dataset_image_path=args.dataset_image_path,
+#                   dataset_csv_path=args.dataset_csv_path,
+#                   dataset_csv_file = train_csv,
+#                   output_size=cnn_image_size,
+#                   random_affine = bool(args.random_affine))
 
-dataloader = DataLoader(dataset, batch_size=args.batch_size,
-                        shuffle=True, 
-                        num_workers=0)
+# dataloader = DataLoader(dataset, batch_size=args.batch_size,
+#                         shuffle=True, 
+#                         num_workers=0)
 
-dataset_test = Dataset(transform=normalization_tnf,
-                       dataset_image_path=args.dataset_image_path,
-                       dataset_csv_path=args.dataset_csv_path,
-                       dataset_csv_file=test_csv,
-                       output_size=cnn_image_size)
+# dataset_test = Dataset(transform=normalization_tnf,
+#                        dataset_image_path=args.dataset_image_path,
+#                        dataset_csv_path=args.dataset_csv_path,
+#                        dataset_csv_file=test_csv,
+#                        output_size=cnn_image_size)
 
-dataloader_test = DataLoader(dataset_test, batch_size=args.batch_size,
-                        shuffle=True, num_workers=4)
-    
+# dataloader_test = DataLoader(dataset_test, batch_size=args.batch_size,
+#                         shuffle=True, num_workers=4)
+
+training_set = StrongLossDataset(file=args.training_file, image_path=args.image_path, transforms=transformer)
+validation_set = StrongLossDataset(file=args.validation_file, image_path=args.image_path, transforms=transformer)
+
+# build dataloader
+training_loader = DataLoader(training_set, batch_size=args.batch_size, num_workers=4, shuffle=True)
+validation_loader = DataLoader(validation_set, batch_size=args.batch_size, num_workers=4, shuffle=True)
+
 # Define checkpoint name
 checkpoint_name = os.path.join(args.result_model_dir,
                                datetime.datetime.now().strftime("%Y-%m-%d_%H:%M")+'_'+args.result_model_fn + '.pth.tar')

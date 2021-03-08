@@ -139,7 +139,7 @@ class GeometricSparseNeighConsensus(torch.nn.Module):
             x = x.squeeze(-1)
             b, s, s, dim1, dim2 , dim3, dim4 = x.shape
             x = x.reshape(b,-1,dim1,dim2,dim3,dim4)
-            x = x.sum(dim=1)
+            x = x.max(dim=1)[0]
             x = dense_to_sparse(x)
             x = torch_to_me(x)
         else:
@@ -501,7 +501,9 @@ class TransformNet(nn.Module):
         # create a 6D tensor
         #import pdb; pdb.set_trace()
         correlations = self.scalespace_correlation(feature_A, feature_B, self.scales, self.conv2ds)
+        assert correlations.D == 6, "Not a 6D sparse tensor"
         corr4d = self.NeighConsensus(correlations)
+        assert correlations.D == 4, "Not a 4D sparse tensor"
         corr4d = self.refineNeighConsensus(corr4d)
 
         if self.return_fs:
